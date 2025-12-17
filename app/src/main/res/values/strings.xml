@@ -1,8 +1,0 @@
-<resources>
-    <string name="app_name">Phase 10 Manager</string>
-    <string name="login_admin">Admin Login</string>
-    <string name="login_user">Nutzer Login</string>
-    <string name="login_guest">Gast starten</string>
-    <string name="phase_header">Phasenverwaltung</string>
-    <string name="player_header">Spielerverwaltung</string>
-</resources>
