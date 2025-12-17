@@ -1,7 +1,7 @@
-*.iml
-.gradle/
-/local.properties
+/data/
+*.sqlite
+*.sqlite-journal
+/vendor/
+*.log
 /.idea/
 .DS_Store
-/build/
-app/build/
