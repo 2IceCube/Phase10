@@ -32,6 +32,7 @@ function initializeSchema(PDO $db, bool $bootstrap): void
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ("admin", "player")),
         deposit_cents INTEGER NOT NULL DEFAULT 0,
+        color TEXT NOT NULL DEFAULT "#1e88e5",
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )');
 
@@ -53,6 +54,13 @@ function initializeSchema(PDO $db, bool $bootstrap): void
         round_number INTEGER NOT NULL DEFAULT 1,
         points INTEGER NOT NULL DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )');
+
+    $db->exec('CREATE TABLE IF NOT EXISTS user_phase_progress (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        phase_number INTEGER NOT NULL,
+        completed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(user_id, phase_number)
     )');
 
     if ($bootstrap) {
@@ -86,6 +94,19 @@ function seedInitialData(PDO $db): void
 
 function ensureDefaults(PDO $db): void
 {
+    // ensure color column for existing installations
+    $columns = $db->query('PRAGMA table_info(users)')->fetchAll();
+    $hasColor = false;
+    foreach ($columns as $col) {
+        if (($col['name'] ?? '') === 'color') {
+            $hasColor = true;
+            break;
+        }
+    }
+    if (!$hasColor) {
+        $db->exec('ALTER TABLE users ADD COLUMN color TEXT NOT NULL DEFAULT "#1e88e5"');
+    }
+
     $adminCount = (int)$db->query('SELECT COUNT(*) FROM users WHERE role = "admin"')->fetchColumn();
     if ($adminCount === 0) {
         $stmt = $db->prepare('INSERT INTO users (username, display_name, password_hash, role) VALUES (:u, :d, :p, :r)');
@@ -129,4 +150,45 @@ function setSetting(PDO $db, string $key, string $value): void
 {
     $stmt = $db->prepare('REPLACE INTO settings (key, value) VALUES (:k, :v)');
     $stmt->execute([':k' => $key, ':v' => $value]);
+}
+
+function getUserPhaseProgress(PDO $db): array
+{
+    $progress = [];
+    $rows = $db->query('SELECT id, display_name, deposit_cents, color FROM users ORDER BY display_name')->fetchAll();
+    foreach ($rows as $row) {
+        $progress[(int)$row['id']] = [
+            'id' => (int)$row['id'],
+            'display_name' => $row['display_name'],
+            'deposit_cents' => (int)$row['deposit_cents'],
+            'color' => $row['color'] ?: '#1e88e5',
+            'completed' => [],
+        ];
+    }
+
+    $done = $db->query('SELECT user_id, phase_number FROM user_phase_progress')->fetchAll();
+    foreach ($done as $row) {
+        $uid = (int)$row['user_id'];
+        if (isset($progress[$uid])) {
+            $progress[$uid]['completed'][] = (int)$row['phase_number'];
+        }
+    }
+
+    return $progress;
+}
+
+function savePhaseProgress(PDO $db, int $userId, array $completed): void
+{
+    $db->beginTransaction();
+    $stmtDelete = $db->prepare('DELETE FROM user_phase_progress WHERE user_id = :u');
+    $stmtDelete->execute([':u' => $userId]);
+
+    $stmtInsert = $db->prepare('INSERT INTO user_phase_progress (user_id, phase_number) VALUES (:u, :p)');
+    foreach ($completed as $phaseNumber) {
+        $num = (int)$phaseNumber;
+        if ($num >= 1 && $num <= 10) {
+            $stmtInsert->execute([':u' => $userId, ':p' => $num]);
+        }
+    }
+    $db->commit();
 }
