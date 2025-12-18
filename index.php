@@ -238,6 +238,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_guest_code') {
 refreshUser($db);
 
 $isAdmin = isLoggedIn() && currentUser()['role'] === 'admin';
+$canViewOverview = isLoggedIn() || isset($_SESSION['guest']);
 $balances = getBalances($db);
 $phases = getPhases($db);
 $scores = getScores($db);
@@ -406,11 +407,13 @@ if ($isAdmin) {
 <?php foreach ($messages as $m): ?><div class="message">✔ <?php echo htmlspecialchars($m); ?></div><?php endforeach; ?>
 <?php foreach ($errors as $e): ?><div class="error">⚠ <?php echo htmlspecialchars($e); ?></div><?php endforeach; ?>
 
-<nav class="nav">
-    <button class="tab-btn" data-tab="overview">Übersicht</button>
-    <?php if (!isLoggedIn() && !isset($_SESSION['guest'])): ?>
-        <button class="tab-btn" data-tab="login">Login</button>
-        <button class="tab-btn" data-tab="guest">Gast</button>
+  <nav class="nav">
+      <?php if ($canViewOverview): ?>
+          <button class="tab-btn" data-tab="overview">Übersicht</button>
+      <?php endif; ?>
+      <?php if (!isLoggedIn() && !isset($_SESSION['guest'])): ?>
+          <button class="tab-btn" data-tab="login">Login</button>
+          <button class="tab-btn" data-tab="guest">Gast</button>
     <?php endif; ?>
     <?php if (isset($_SESSION['guest'])): ?>
         <button class="tab-btn" data-tab="guest">Gast</button>
@@ -425,49 +428,57 @@ if ($isAdmin) {
     <?php endif; ?>
 </nav>
 
-<section class="section" data-tab="overview">
-    <div class="grid two">
-        <div class="card">
-            <div class="top-bar">
-                <h2 style="margin:0;">Rangliste & Guthaben</h2>
-                <span class="badge">1 Punkt = 1 Cent</span>
-            </div>
-            <div style="overflow-x:auto;">
-                <table>
-                    <thead>
-                    <tr><th>Platz</th><th>Spieler</th><th>Einzahlung</th><th>Punkte</th><th>Restguthaben</th></tr>
-                    </thead>
-                    <tbody>
-                    <?php foreach ($balances as $index => $row): ?>
-                        <tr>
-                            <td><?php echo $index + 1; ?></td>
-                            <td><?php echo htmlspecialchars($row['name']); ?></td>
-                            <td><?php echo number_format($row['deposit']/100, 2, ',', '.'); ?> €</td>
-                            <td><?php echo $row['points']; ?> Pkt</td>
-                            <td><strong><?php echo number_format($row['remaining']/100, 2, ',', '.'); ?> €</strong></td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        <div class="card">
-            <div class="top-bar">
-                <h2 style="margin:0;">Phasenübersicht</h2>
-                <span class="badge">Individuell pro Phase</span>
-            </div>
-            <div class="grid three">
-                <?php foreach ($phases as $phase): ?>
-                    <div class="card" style="background:var(--surface-soft); border-color:var(--border);">
-                        <div class="badge">Phase <?php echo (int)$phase['phase_number']; ?></div>
-                        <div style="font-weight:700; margin:.35rem 0;"><?php echo htmlspecialchars($phase['title']); ?></div>
-                        <div style="color:var(--muted); white-space:pre-wrap;"><?php echo htmlspecialchars($phase['info']); ?></div>
-                    </div>
-                <?php endforeach; ?>
-            </div>
-        </div>
-    </div>
-</section>
+  <section class="section" data-tab="overview">
+      <?php if ($canViewOverview): ?>
+      <div class="grid two">
+          <div class="card">
+              <div class="top-bar">
+                  <h2 style="margin:0;">Rangliste & Guthaben</h2>
+                  <span class="badge">1 Punkt = 1 Cent</span>
+              </div>
+              <div style="overflow-x:auto;">
+                  <table>
+                      <thead>
+                      <tr><th>Platz</th><th>Spieler</th><th>Einzahlung</th><th>Punkte</th><th>Restguthaben</th></tr>
+                      </thead>
+                      <tbody>
+                      <?php foreach ($balances as $index => $row): ?>
+                          <tr>
+                              <td><?php echo $index + 1; ?></td>
+                              <td><?php echo htmlspecialchars($row['name']); ?></td>
+                              <td><?php echo number_format($row['deposit']/100, 2, ',', '.'); ?> €</td>
+                              <td><?php echo $row['points']; ?> Pkt</td>
+                              <td><strong><?php echo number_format($row['remaining']/100, 2, ',', '.'); ?> €</strong></td>
+                          </tr>
+                      <?php endforeach; ?>
+                      </tbody>
+                  </table>
+              </div>
+          </div>
+          <div class="card">
+              <div class="top-bar">
+                  <h2 style="margin:0;">Phasenübersicht</h2>
+                  <span class="badge">Individuell pro Phase</span>
+              </div>
+              <div class="grid three">
+                  <?php foreach ($phases as $phase): ?>
+                      <div class="card" style="background:var(--surface-soft); border-color:var(--border);">
+                          <div class="badge">Phase <?php echo (int)$phase['phase_number']; ?></div>
+                          <div style="font-weight:700; margin:.35rem 0;"><?php echo htmlspecialchars($phase['title']); ?></div>
+                          <div style="color:var(--muted); white-space:pre-wrap;"><?php echo htmlspecialchars($phase['info']); ?></div>
+                      </div>
+                  <?php endforeach; ?>
+              </div>
+          </div>
+      </div>
+      <?php else: ?>
+      <div class="card">
+          <h2>Gastcode oder Login nötig</h2>
+          <p class="subtitle">Bitte melde dich an oder gib den gültigen Gastcode ein, um Rangliste und Phasen zu sehen.</p>
+          <div class="badge">Übersicht geschützt</div>
+      </div>
+      <?php endif; ?>
+  </section>
 
 <section class="section" data-tab="login">
     <div class="grid two">
