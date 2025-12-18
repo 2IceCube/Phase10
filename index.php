@@ -244,11 +244,30 @@ $isAdmin = isLoggedIn() && currentUser()['role'] === 'admin';
 if (isset($_POST['action']) && $_POST['action'] === 'save_progress') {
     $userId = (int)($_POST['user_id'] ?? 0);
     $allowed = $isAdmin || (isLoggedIn() && currentUser()['id'] === $userId);
+    $isAjax = (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') || isset($_POST['ajax']);
     if ($allowed && $userId > 0) {
         $completed = $_POST['phase_completed'] ?? [];
         savePhaseProgress($db, $userId, $completed);
+        $progressResponse = [
+            'success' => true,
+            'user_id' => $userId,
+            'completed' => array_values(array_map('intval', $completed)),
+            'percent' => count($completed) * 10,
+            'remaining_cents' => (int)(currentUser()['id'] === $userId ? currentUser()['deposit_cents'] - sumPoints($db, $userId) : null),
+        ];
+        if ($isAjax) {
+            header('Content-Type: application/json');
+            echo json_encode($progressResponse);
+            exit;
+        }
         $messages[] = 'Phasenfortschritt gespeichert.';
     } else {
+        if ($isAjax) {
+            header('HTTP/1.1 403 Forbidden');
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'error' => 'Keine Berechtigung.']);
+            exit;
+        }
         $errors[] = 'Keine Berechtigung für diese Aktion.';
     }
 }
@@ -263,6 +282,7 @@ $phaseProgress = getUserPhaseProgress($db);
 $scores = getScores($db);
 $currentWinner = $balances[0] ?? null;
 $guestCode = getSetting($db, 'guest_code', '1234');
+$canViewCards = $isAdmin || isLoggedIn();
 
 $initialTab = 'overview';
 if ($isAdmin) {
@@ -273,6 +293,32 @@ if ($isAdmin) {
     $initialTab = 'guest';
 } else {
     $initialTab = 'login';
+}
+
+if (isset($_GET['action']) && $_GET['action'] === 'progress') {
+    if (!$canViewCards) {
+        header('HTTP/1.1 403 Forbidden');
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'error' => 'Keine Berechtigung.']);
+        exit;
+    }
+
+    $visible = [];
+    foreach ($phaseProgress as $player) {
+        if ($isAdmin || (isLoggedIn() && currentUser()['id'] === $player['id'])) {
+            $visible[] = [
+                'id' => $player['id'],
+                'display_name' => $player['display_name'],
+                'color' => $player['color'],
+                'completed' => $player['completed'],
+                'remaining_cents' => $player['deposit_cents'] - sumPoints($db, $player['id']),
+            ];
+        }
+    }
+
+    header('Content-Type: application/json');
+    echo json_encode(['success' => true, 'players' => $visible]);
+    exit;
 }
 ?>
 <!doctype html>
@@ -476,6 +522,8 @@ if ($isAdmin) {
   <nav class="nav">
       <?php if ($canViewOverview): ?>
           <button class="tab-btn" data-tab="overview">Übersicht</button>
+      <?php endif; ?>
+      <?php if ($canViewCards): ?>
           <button class="tab-btn" data-tab="cards">Spielerkarten</button>
       <?php endif; ?>
       <?php if (!isLoggedIn() && !isset($_SESSION['guest'])): ?>
@@ -548,29 +596,40 @@ if ($isAdmin) {
   </section>
 
   <section class="section" data-tab="cards">
-      <?php if ($canViewOverview): ?>
+      <?php if ($canViewCards): ?>
       <div class="grid two">
-          <?php foreach ($phaseProgress as $player):
+          <?php
+          $visiblePlayers = array_values(array_filter($phaseProgress, function ($player) use ($isAdmin) {
+              return $isAdmin || (isLoggedIn() && currentUser()['id'] === $player['id']);
+          }));
+          ?>
+          <?php if (empty($visiblePlayers)): ?>
+              <div class="card">
+                  <h2>Keine Karte verfügbar</h2>
+                  <p class="subtitle">Bitte anmelden, um die eigene Phase-10-Karte zu sehen.</p>
+              </div>
+          <?php endif; ?>
+          <?php foreach ($visiblePlayers as $player):
               $completed = $player['completed'];
               $percentage = count($completed) * 10;
               ?>
-              <div class="card player-card">
+              <div class="card player-card" data-user-id="<?php echo $player['id']; ?>">
                   <div class="stripe" style="background: linear-gradient(130deg, <?php echo htmlspecialchars($player['color']); ?> 0%, rgba(0,0,0,0.05) 60%);"></div>
                   <div style="position:relative; z-index:1; display:flex; justify-content:space-between; align-items:center; gap:1rem;">
                       <div>
                           <div class="phase-badge" style="background: <?php echo htmlspecialchars($player['color']); ?>; color:#0b1220;">Phase 10</div>
                           <h2 style="margin:.5rem 0 0; color:#0b1220;"><?php echo htmlspecialchars($player['display_name']); ?></h2>
-                          <p style="margin:.1rem 0; color:#1f2a44;">Restguthaben: <?php echo number_format(($player['deposit_cents'] - sumPoints($db, $player['id']))/100, 2, ',', '.'); ?> €</p>
+                          <p style="margin:.1rem 0; color:#1f2a44;" data-remaining-for="<?php echo $player['id']; ?>">Restguthaben: <?php echo number_format(($player['deposit_cents'] - sumPoints($db, $player['id']))/100, 2, ',', '.'); ?> €</p>
                       </div>
                       <div style="text-align:right;">
-                          <div style="font-weight:800; font-size:2rem; color:#0b1220;"><?php echo $percentage; ?>%</div>
+                          <div style="font-weight:800; font-size:2rem; color:#0b1220;" data-progress-text="<?php echo $player['id']; ?>"><?php echo $percentage; ?>%</div>
                           <small style="color:#1f2a44;">Phasen geschafft</small>
                       </div>
                   </div>
                   <div class="progress-track" style="margin:1rem 0 .75rem;">
-                      <span style="width: <?php echo $percentage; ?>%;"></span>
+                      <span style="width: <?php echo $percentage; ?>%;" data-progress-bar="<?php echo $player['id']; ?>"></span>
                   </div>
-                  <form method="post" class="grid" style="position:relative; z-index:1;">
+                  <form method="post" class="grid phase-form" data-user-id="<?php echo $player['id']; ?>" style="position:relative; z-index:1;">
                       <input type="hidden" name="action" value="save_progress">
                       <input type="hidden" name="user_id" value="<?php echo $player['id']; ?>">
                       <div class="phase-steps">
@@ -582,7 +641,8 @@ if ($isAdmin) {
                           <?php endfor; ?>
                       </div>
                       <?php if ($isAdmin || (isLoggedIn() && currentUser()['id'] === $player['id'])): ?>
-                          <button type="submit">Fortschritt speichern</button>
+                          <button type="submit" style="display:none;">Fallback speichern</button>
+                          <p class="subtitle">Änderungen werden automatisch übernommen.</p>
                       <?php else: ?>
                           <p class="subtitle">Nur der Spieler selbst oder Admins können Phasen abhaken.</p>
                       <?php endif; ?>
@@ -592,8 +652,8 @@ if ($isAdmin) {
       </div>
       <?php else: ?>
           <div class="card">
-              <h2>Gastcode oder Login nötig</h2>
-              <p class="subtitle">Bitte melde dich an oder gib den gültigen Gastcode ein, um die Spielerkarten zu sehen.</p>
+              <h2>Anmeldung erforderlich</h2>
+              <p class="subtitle">Bitte melde dich an, um deine persönliche Phase-10-Karte zu sehen.</p>
           </div>
       <?php endif; ?>
   </section>
@@ -850,6 +910,72 @@ if ($isAdmin) {
     const hashTab = window.location.hash.replace('#', '');
     const startTab = Array.from(buttons).some(b => b.dataset.tab === hashTab) ? hashTab : initial;
     activate(startTab);
+
+    function formatEuro(cents) {
+        return (cents / 100).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function syncCard(userId, completed, percent, remainingCents) {
+        const card = document.querySelector(`.player-card[data-user-id="${userId}"]`);
+        if (!card) return;
+        const checkboxes = card.querySelectorAll('input[type="checkbox"][name="phase_completed[]"]');
+        checkboxes.forEach(cb => {
+            cb.checked = completed.includes(parseInt(cb.value, 10));
+        });
+        const bar = card.querySelector(`[data-progress-bar="${userId}"]`);
+        if (bar) bar.style.width = `${percent}%`;
+        const text = card.querySelector(`[data-progress-text="${userId}"]`);
+        if (text) text.textContent = `${percent}%`;
+        const remaining = card.querySelector(`[data-remaining-for="${userId}"]`);
+        if (remaining && typeof remainingCents === 'number' && !Number.isNaN(remainingCents)) {
+            remaining.textContent = `Restguthaben: ${formatEuro(remainingCents)} €`;
+        }
+    }
+
+    const phaseForms = document.querySelectorAll('.phase-form');
+    phaseForms.forEach(form => {
+        const userId = form.dataset.userId;
+        const checkboxes = form.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(cb => {
+            cb.addEventListener('change', () => {
+                const data = new FormData(form);
+                data.append('ajax', '1');
+                fetch('', {
+                    method: 'POST',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                    body: data
+                })
+                    .then(r => r.json())
+                    .then(res => {
+                        if (!res.success) {
+                            throw new Error(res.error || 'Fehler beim Speichern');
+                        }
+                        syncCard(res.user_id, res.completed, res.percent, res.remaining_cents);
+                    })
+                    .catch(err => {
+                        console.error(err);
+                        alert('Konnte Fortschritt nicht speichern. Bitte Seite neu laden.');
+                    });
+            });
+        });
+    });
+
+    function pollProgress() {
+        if (!phaseForms.length) return;
+        fetch('?action=progress', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(r => r.ok ? r.json() : { success: false })
+            .then(data => {
+                if (!data.success || !Array.isArray(data.players)) return;
+                data.players.forEach(player => {
+                    const percent = (player.completed?.length || 0) * 10;
+                    syncCard(player.id, player.completed.map(Number), percent, player.remaining_cents);
+                });
+            })
+            .catch(() => {});
+    }
+
+    pollProgress();
+    setInterval(pollProgress, 5000);
 </script>
 </body>
 </html>
