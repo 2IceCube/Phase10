@@ -1,0 +1,7 @@
+/data/
+*.sqlite
+*.sqlite-journal
+/vendor/
+*.log
+/.idea/
+.DS_Store
