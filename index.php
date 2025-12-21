@@ -3,6 +3,7 @@ require_once __DIR__ . '/db.php';
 
 session_start();
 $db = getDb();
+cleanupExpiredGuests($db);
 $messages = [];
 $errors = [];
 
@@ -25,6 +26,8 @@ function refreshUser(PDO $db): void
     $stmt->execute([':id' => $_SESSION['user']['id']]);
     if ($row = $stmt->fetch()) {
         $_SESSION['user'] = $row;
+    } else {
+        unset($_SESSION['user']);
     }
 }
 
@@ -110,10 +113,21 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
 
 if (isset($_POST['action']) && $_POST['action'] === 'guest_login') {
     $code = trim($_POST['guest_code'] ?? '');
-    $expected = getSetting($db, 'guest_code', '1234');
-    if (preg_match('/^\d{4}$/', $code) && $code === $expected) {
-        $_SESSION['guest'] = true;
-        $messages[] = 'Gastzugang aktiv.';
+    if (preg_match('/^\d{4}$/', $code)) {
+        $stmt = $db->prepare('SELECT id, username, display_name, role, deposit_cents FROM users WHERE guest_code = :c AND guest_expires_at > datetime("now")');
+        $stmt->execute([':c' => $code]);
+        if ($user = $stmt->fetch()) {
+            $_SESSION['user'] = [
+                'id' => $user['id'],
+                'username' => $user['username'],
+                'display_name' => $user['display_name'],
+                'role' => $user['role'],
+                'deposit_cents' => $user['deposit_cents'],
+            ];
+            $messages[] = 'Gastzugang aktiv.';
+        } else {
+            $errors[] = 'Gastcode ungültig oder abgelaufen. Bitte neuen Code beim Admin erfragen.';
+        }
     } else {
         $errors[] = 'Gastcode ungültig. Bitte den 4-stelligen Code beim Admin erfragen.';
     }
@@ -125,14 +139,16 @@ if (isset($_POST['action']) && $_POST['action'] === 'create_user') {
     $display = trim($_POST['display_name'] ?? '');
     $password = $_POST['password'] ?? '';
     $role = $_POST['role'] === 'admin' ? 'admin' : 'player';
+    $color = trim($_POST['color'] ?? '#1e88e5');
     if ($username && $display && $password) {
-        $stmt = $db->prepare('INSERT INTO users (username, display_name, password_hash, role) VALUES (:u, :d, :p, :r)');
+        $stmt = $db->prepare('INSERT INTO users (username, display_name, password_hash, role, color) VALUES (:u, :d, :p, :r, :c)');
         try {
             $stmt->execute([
                 ':u' => $username,
                 ':d' => $display,
                 ':p' => password_hash($password, PASSWORD_DEFAULT),
                 ':r' => $role,
+                ':c' => $color ?: '#1e88e5',
             ]);
             $messages[] = 'Nutzer wurde angelegt.';
         } catch (PDOException $e) {
@@ -140,6 +156,45 @@ if (isset($_POST['action']) && $_POST['action'] === 'create_user') {
         }
     } else {
         $errors[] = 'Bitte alle Felder ausfüllen (Nutzername, Anzeigename, Passwort).';
+    }
+}
+
+if (isset($_POST['action']) && $_POST['action'] === 'create_guest') {
+    requireAdmin();
+    $display = trim($_POST['display_name'] ?? '');
+    $code = trim($_POST['guest_code'] ?? '');
+    $deposit = (int)round((float)($_POST['deposit_euro'] ?? 0) * 100);
+    $color = trim($_POST['color'] ?? '#1e88e5');
+    if ($display && preg_match('/^\d{4}$/', $code)) {
+        $baseUsername = 'gast-' . $code;
+        $username = $baseUsername;
+        $suffix = 1;
+        while (true) {
+            $check = $db->prepare('SELECT 1 FROM users WHERE username = :u');
+            $check->execute([':u' => $username]);
+            if (!$check->fetchColumn()) {
+                break;
+            }
+            $username = $baseUsername . '-' . $suffix;
+            $suffix++;
+        }
+        $stmt = $db->prepare('INSERT INTO users (username, display_name, password_hash, role, deposit_cents, color, guest_code, guest_expires_at) VALUES (:u, :d, :p, :r, :dep, :c, :g, datetime("now", "+1 day"))');
+        try {
+            $stmt->execute([
+                ':u' => $username,
+                ':d' => $display,
+                ':p' => password_hash(bin2hex(random_bytes(8)), PASSWORD_DEFAULT),
+                ':r' => 'player',
+                ':dep' => $deposit,
+                ':c' => $color ?: '#1e88e5',
+                ':g' => $code,
+            ]);
+            $messages[] = 'Gastaccount wurde angelegt (24h gültig).';
+        } catch (PDOException $e) {
+            $errors[] = 'Fehler beim Anlegen: ' . htmlspecialchars($e->getMessage());
+        }
+    } else {
+        $errors[] = 'Bitte Anzeigename und 4-stelligen Gastcode angeben.';
     }
 }
 
@@ -157,9 +212,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'rename_user') {
     requireAdmin();
     $userId = (int)($_POST['user_id'] ?? 0);
     $display = trim($_POST['display_name'] ?? '');
+    $color = trim($_POST['color'] ?? '#1e88e5');
     if ($display) {
-        $stmt = $db->prepare('UPDATE users SET display_name = :n WHERE id = :id');
-        $stmt->execute([':n' => $display, ':id' => $userId]);
+        $stmt = $db->prepare('UPDATE users SET display_name = :n, color = :c WHERE id = :id');
+        $stmt->execute([':n' => $display, ':c' => $color ?: '#1e88e5', ':id' => $userId]);
         $messages[] = 'Name geändert.';
         refreshUser($db);
     }
@@ -224,35 +280,84 @@ if (isset($_POST['action']) && $_POST['action'] === 'update_phase') {
     }
 }
 
-if (isset($_POST['action']) && $_POST['action'] === 'update_guest_code') {
-    requireAdmin();
-    $code = trim($_POST['guest_code'] ?? '');
-    if (preg_match('/^\d{4}$/', $code)) {
-        setSetting($db, 'guest_code', $code);
-        $messages[] = 'Gastcode aktualisiert.';
+refreshUser($db);
+$isAdmin = isLoggedIn() && currentUser()['role'] === 'admin';
+
+if (isset($_POST['action']) && $_POST['action'] === 'save_progress') {
+    $userId = (int)($_POST['user_id'] ?? 0);
+    $allowed = $isAdmin || (isLoggedIn() && currentUser()['id'] === $userId);
+    $isAjax = (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') || isset($_POST['ajax']);
+    if ($allowed && $userId > 0) {
+        $completed = $_POST['phase_completed'] ?? [];
+        savePhaseProgress($db, $userId, $completed);
+        $progressResponse = [
+            'success' => true,
+            'user_id' => $userId,
+            'completed' => array_values(array_map('intval', $completed)),
+            'percent' => count($completed) * 10,
+            'remaining_cents' => (int)(currentUser()['id'] === $userId ? currentUser()['deposit_cents'] - sumPoints($db, $userId) : null),
+        ];
+        if ($isAjax) {
+            header('Content-Type: application/json');
+            echo json_encode($progressResponse);
+            exit;
+        }
+        $messages[] = 'Phasenfortschritt gespeichert.';
     } else {
-        $errors[] = 'Gastcode muss 4-stellig und numerisch sein.';
+        if ($isAjax) {
+            header('HTTP/1.1 403 Forbidden');
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'error' => 'Keine Berechtigung.']);
+            exit;
+        }
+        $errors[] = 'Keine Berechtigung für diese Aktion.';
     }
 }
 
 refreshUser($db);
 
 $isAdmin = isLoggedIn() && currentUser()['role'] === 'admin';
+$canViewOverview = isLoggedIn();
 $balances = getBalances($db);
 $phases = getPhases($db);
+$phaseProgress = getUserPhaseProgress($db);
 $scores = getScores($db);
 $currentWinner = $balances[0] ?? null;
-$guestCode = getSetting($db, 'guest_code', '1234');
+$canViewCards = $isAdmin || isLoggedIn();
 
 $initialTab = 'overview';
 if ($isAdmin) {
     $initialTab = 'admin-game';
 } elseif (isLoggedIn()) {
-    $initialTab = 'player';
-} elseif (isset($_SESSION['guest'])) {
-    $initialTab = 'guest';
+    $initialTab = 'cards';
 } else {
     $initialTab = 'login';
+}
+
+if (isset($_GET['action']) && $_GET['action'] === 'progress') {
+    if (!$canViewCards) {
+        header('HTTP/1.1 403 Forbidden');
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'error' => 'Keine Berechtigung.']);
+        exit;
+    }
+
+    $visible = [];
+    foreach ($phaseProgress as $player) {
+        if ($isAdmin || (isLoggedIn() && currentUser()['id'] === $player['id'])) {
+            $visible[] = [
+                'id' => $player['id'],
+                'display_name' => $player['display_name'],
+                'color' => $player['color'],
+                'completed' => $player['completed'],
+                'remaining_cents' => $player['deposit_cents'] - sumPoints($db, $player['id']),
+            ];
+        }
+    }
+
+    header('Content-Type: application/json');
+    echo json_encode(['success' => true, 'players' => $visible]);
+    exit;
 }
 ?>
 <!doctype html>
@@ -374,8 +479,71 @@ if ($isAdmin) {
         .pill { padding: .35rem .55rem; border-radius: 8px; background: rgba(255,255,255,0.04); font-weight: 600; }
         .stack { display: grid; gap: .5rem; }
         .flex { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+        .player-card {
+            position: relative;
+            overflow: hidden;
+            color: #0b1220;
+            background: linear-gradient(160deg, #f6f7fb 0%, #cfd8e3 70%, #b7c4d3 100%);
+            box-shadow: inset 0 0 0 2px rgba(0,0,0,0.05), 0 18px 40px rgba(0,0,0,0.35);
+            border-radius: 18px;
+            min-height: 420px;
+            display: flex;
+            flex-direction: column;
+        }
+        .player-card::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: repeating-linear-gradient(45deg, rgba(255,255,255,0.25) 0, rgba(255,255,255,0.25) 6px, rgba(255,255,255,0.05) 6px, rgba(255,255,255,0.05) 12px);
+            opacity: .35;
+            pointer-events: none;
+        }
+        .player-card .stripe {
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(120deg, rgba(0,0,0,0.1) 0%, rgba(0,0,0,0) 40%);
+            pointer-events: none;
+        }
+        .phase-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: .4rem;
+            padding: .35rem .75rem;
+            border-radius: 999px;
+            font-weight: 700;
+            background: #0b1220;
+            color: #fff;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+        }
+        .phase-steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: .35rem; }
+        .phase-steps label {
+            display: flex;
+            align-items: center;
+            gap: .5rem;
+            background: rgba(11, 18, 32, 0.04);
+            padding: .45rem .6rem;
+            border-radius: 10px;
+            border: 1px solid rgba(0,0,0,0.06);
+            color: #0b1220;
+        }
+        .phase-steps input { width: auto; }
+        .phase-form { margin-top: auto; }
+        .progress-track { width: 100%; height: 10px; border-radius: 999px; background: rgba(11, 18, 32, 0.12); overflow: hidden; }
+        .progress-track span { display: block; height: 100%; background: linear-gradient(90deg, #0b1220, var(--accent)); }
         @media (max-width: 720px) {
             header { flex-direction: column; align-items: flex-start; position: static; }
+            .nav { overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: .5rem; }
+            .section { padding: 0 1rem 1.5rem; }
+            .grid.two, .grid.three { grid-template-columns: 1fr; }
+            .tab-btn { flex: 0 0 auto; }
+            .player-card {
+                min-height: calc(100vh - 260px);
+                border-radius: 24px;
+                padding: 1.5rem;
+            }
+            .phase-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .phase-steps label { padding: .55rem .65rem; }
+            .phase-steps input { transform: scale(1.2); }
         }
     </style>
 </head>
@@ -393,9 +561,6 @@ if ($isAdmin) {
             <?php if (isLoggedIn()): ?>
                 <span class="pill">Angemeldet als <?php echo htmlspecialchars(currentUser()['display_name']); ?> (<?php echo htmlspecialchars(currentUser()['role']); ?>)</span>
                 <a class="pill" href="?logout=1" style="text-decoration:none;">Abmelden</a>
-            <?php elseif (isset($_SESSION['guest'])): ?>
-                <span class="pill">Gastmodus aktiv</span>
-                <a class="pill" href="?logout=1" style="text-decoration:none;">Beenden</a>
             <?php else: ?>
                 <span class="pill">Nicht angemeldet</span>
             <?php endif; ?>
@@ -406,14 +571,16 @@ if ($isAdmin) {
 <?php foreach ($messages as $m): ?><div class="message">✔ <?php echo htmlspecialchars($m); ?></div><?php endforeach; ?>
 <?php foreach ($errors as $e): ?><div class="error">⚠ <?php echo htmlspecialchars($e); ?></div><?php endforeach; ?>
 
-<nav class="nav">
-    <button class="tab-btn" data-tab="overview">Übersicht</button>
-    <?php if (!isLoggedIn() && !isset($_SESSION['guest'])): ?>
-        <button class="tab-btn" data-tab="login">Login</button>
-        <button class="tab-btn" data-tab="guest">Gast</button>
-    <?php endif; ?>
-    <?php if (isset($_SESSION['guest'])): ?>
-        <button class="tab-btn" data-tab="guest">Gast</button>
+  <nav class="nav">
+      <?php if ($canViewOverview): ?>
+          <button class="tab-btn" data-tab="overview">Übersicht</button>
+      <?php endif; ?>
+      <?php if ($canViewCards): ?>
+          <button class="tab-btn" data-tab="cards">Spielerkarten</button>
+      <?php endif; ?>
+      <?php if (!isLoggedIn()): ?>
+          <button class="tab-btn" data-tab="login">Login</button>
+          <button class="tab-btn" data-tab="guest">Gast</button>
     <?php endif; ?>
     <?php if (isLoggedIn() && currentUser()['role'] === 'player'): ?>
         <button class="tab-btn" data-tab="player">Spieler</button>
@@ -425,49 +592,120 @@ if ($isAdmin) {
     <?php endif; ?>
 </nav>
 
-<section class="section" data-tab="overview">
-    <div class="grid two">
-        <div class="card">
-            <div class="top-bar">
-                <h2 style="margin:0;">Rangliste & Guthaben</h2>
-                <span class="badge">1 Punkt = 1 Cent</span>
-            </div>
-            <div style="overflow-x:auto;">
-                <table>
-                    <thead>
-                    <tr><th>Platz</th><th>Spieler</th><th>Einzahlung</th><th>Punkte</th><th>Restguthaben</th></tr>
-                    </thead>
-                    <tbody>
-                    <?php foreach ($balances as $index => $row): ?>
-                        <tr>
-                            <td><?php echo $index + 1; ?></td>
-                            <td><?php echo htmlspecialchars($row['name']); ?></td>
-                            <td><?php echo number_format($row['deposit']/100, 2, ',', '.'); ?> €</td>
-                            <td><?php echo $row['points']; ?> Pkt</td>
-                            <td><strong><?php echo number_format($row['remaining']/100, 2, ',', '.'); ?> €</strong></td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        <div class="card">
-            <div class="top-bar">
-                <h2 style="margin:0;">Phasenübersicht</h2>
-                <span class="badge">Individuell pro Phase</span>
-            </div>
-            <div class="grid three">
-                <?php foreach ($phases as $phase): ?>
-                    <div class="card" style="background:var(--surface-soft); border-color:var(--border);">
-                        <div class="badge">Phase <?php echo (int)$phase['phase_number']; ?></div>
-                        <div style="font-weight:700; margin:.35rem 0;"><?php echo htmlspecialchars($phase['title']); ?></div>
-                        <div style="color:var(--muted); white-space:pre-wrap;"><?php echo htmlspecialchars($phase['info']); ?></div>
-                    </div>
-                <?php endforeach; ?>
-            </div>
-        </div>
-    </div>
-</section>
+  <section class="section" data-tab="overview">
+      <?php if ($canViewOverview): ?>
+      <div class="grid two">
+          <div class="card">
+              <div class="top-bar">
+                  <h2 style="margin:0;">Rangliste & Guthaben</h2>
+                  <span class="badge">1 Punkt = 1 Cent</span>
+              </div>
+              <div style="overflow-x:auto;">
+                  <table>
+                      <thead>
+                      <tr><th>Platz</th><th>Spieler</th><th>Einzahlung</th><th>Punkte</th><th>Restguthaben</th></tr>
+                      </thead>
+                      <tbody>
+                      <?php foreach ($balances as $index => $row): ?>
+                          <tr>
+                              <td><?php echo $index + 1; ?></td>
+                              <td><?php echo htmlspecialchars($row['name']); ?></td>
+                              <td><?php echo number_format($row['deposit']/100, 2, ',', '.'); ?> €</td>
+                              <td><?php echo $row['points']; ?> Pkt</td>
+                              <td><strong><?php echo number_format($row['remaining']/100, 2, ',', '.'); ?> €</strong></td>
+                          </tr>
+                      <?php endforeach; ?>
+                      </tbody>
+                  </table>
+              </div>
+          </div>
+          <div class="card">
+              <div class="top-bar">
+                  <h2 style="margin:0;">Phasenübersicht</h2>
+                  <span class="badge">Individuell pro Phase</span>
+              </div>
+              <div class="grid three">
+                  <?php foreach ($phases as $phase): ?>
+                      <div class="card" style="background:var(--surface-soft); border-color:var(--border);">
+                          <div class="badge">Phase <?php echo (int)$phase['phase_number']; ?></div>
+                          <div style="font-weight:700; margin:.35rem 0;"><?php echo htmlspecialchars($phase['title']); ?></div>
+                          <div style="color:var(--muted); white-space:pre-wrap;"><?php echo htmlspecialchars($phase['info']); ?></div>
+                      </div>
+                  <?php endforeach; ?>
+              </div>
+          </div>
+      </div>
+      <?php else: ?>
+      <div class="card">
+          <h2>Login oder Gastcode nötig</h2>
+          <p class="subtitle">Bitte melde dich an oder nutze einen gültigen Gastcode, um Rangliste und Phasen zu sehen.</p>
+          <div class="badge">Übersicht geschützt</div>
+      </div>
+      <?php endif; ?>
+  </section>
+
+  <section class="section" data-tab="cards">
+      <?php if ($canViewCards): ?>
+      <div class="grid two">
+          <?php
+          $visiblePlayers = array_values(array_filter($phaseProgress, function ($player) use ($isAdmin) {
+              return $isAdmin || (isLoggedIn() && currentUser()['id'] === $player['id']);
+          }));
+          ?>
+          <?php if (empty($visiblePlayers)): ?>
+              <div class="card">
+                  <h2>Keine Karte verfügbar</h2>
+                  <p class="subtitle">Bitte anmelden, um die eigene Phase-10-Karte zu sehen.</p>
+              </div>
+          <?php endif; ?>
+          <?php foreach ($visiblePlayers as $player):
+              $completed = $player['completed'];
+              $percentage = count($completed) * 10;
+              ?>
+              <div class="card player-card" data-user-id="<?php echo $player['id']; ?>">
+                  <div class="stripe" style="background: linear-gradient(130deg, <?php echo htmlspecialchars($player['color']); ?> 0%, rgba(0,0,0,0.05) 60%);"></div>
+                  <div style="position:relative; z-index:1; display:flex; justify-content:space-between; align-items:center; gap:1rem;">
+                      <div>
+                          <div class="phase-badge" style="background: <?php echo htmlspecialchars($player['color']); ?>; color:#0b1220;">Phase 10</div>
+                          <h2 style="margin:.5rem 0 0; color:#0b1220;"><?php echo htmlspecialchars($player['display_name']); ?></h2>
+                          <p style="margin:.1rem 0; color:#1f2a44;" data-remaining-for="<?php echo $player['id']; ?>">Restguthaben: <?php echo number_format(($player['deposit_cents'] - sumPoints($db, $player['id']))/100, 2, ',', '.'); ?> €</p>
+                      </div>
+                      <div style="text-align:right;">
+                          <div style="font-weight:800; font-size:2rem; color:#0b1220;" data-progress-text="<?php echo $player['id']; ?>"><?php echo $percentage; ?>%</div>
+                          <small style="color:#1f2a44;">Phasen geschafft</small>
+                      </div>
+                  </div>
+                  <div class="progress-track" style="margin:1rem 0 .75rem;">
+                      <span style="width: <?php echo $percentage; ?>%;" data-progress-bar="<?php echo $player['id']; ?>"></span>
+                  </div>
+                  <form method="post" class="grid phase-form" data-user-id="<?php echo $player['id']; ?>" style="position:relative; z-index:1;">
+                      <input type="hidden" name="action" value="save_progress">
+                      <input type="hidden" name="user_id" value="<?php echo $player['id']; ?>">
+                      <div class="phase-steps">
+                          <?php for ($i = 1; $i <= 10; $i++): ?>
+                              <label>
+                                  <input type="checkbox" name="phase_completed[]" value="<?php echo $i; ?>" <?php echo in_array($i, $completed, true) ? 'checked' : ''; ?> <?php echo ($isAdmin || (isLoggedIn() && currentUser()['id'] === $player['id'])) ? '' : 'disabled'; ?>>
+                                  Phase <?php echo $i; ?>
+                              </label>
+                          <?php endfor; ?>
+                      </div>
+                      <?php if ($isAdmin || (isLoggedIn() && currentUser()['id'] === $player['id'])): ?>
+                          <button type="submit" style="display:none;">Fallback speichern</button>
+                          <p class="subtitle">Änderungen werden automatisch übernommen.</p>
+                      <?php else: ?>
+                          <p class="subtitle">Nur der Spieler selbst oder Admins können Phasen abhaken.</p>
+                      <?php endif; ?>
+                  </form>
+              </div>
+          <?php endforeach; ?>
+      </div>
+      <?php else: ?>
+          <div class="card">
+              <h2>Anmeldung erforderlich</h2>
+              <p class="subtitle">Bitte melde dich an, um deine persönliche Phase-10-Karte zu sehen.</p>
+          </div>
+      <?php endif; ?>
+  </section>
 
 <section class="section" data-tab="login">
     <div class="grid two">
@@ -486,8 +724,8 @@ if ($isAdmin) {
         </div>
         <div class="card" style="background:var(--surface-soft);">
             <h3>Gastcode beim Admin holen</h3>
-            <p class="subtitle">Admins vergeben einen 4-stelligen Code, damit Gäste beitreten können.</p>
-            <div class="badge">Sicherer Zugang</div>
+            <p class="subtitle">Admins erstellen einen Gastaccount mit 4-stelligem Code. Der Zugang ist 24 Stunden gültig.</p>
+            <div class="badge">Zeitlich begrenzt</div>
         </div>
     </div>
 </section>
@@ -495,23 +733,20 @@ if ($isAdmin) {
 <section class="section" data-tab="guest">
     <div class="grid two">
         <div class="card">
-            <h2>Gast beitreten</h2>
+            <h2>Mit Gastcode anmelden</h2>
             <form method="post">
                 <input type="hidden" name="action" value="guest_login">
                 <label>4-stelliger Gastcode
                     <input name="guest_code" pattern="\d{4}" minlength="4" maxlength="4" required placeholder="z.B. 1234">
                 </label>
-                <button type="submit">Gastmodus starten</button>
+                <button type="submit">Gastlogin starten</button>
             </form>
-            <?php if (isset($_SESSION['guest'])): ?>
-                <p class="subtitle" style="margin-top:.75rem;">Gastmodus aktiv – du kannst die Übersicht und Phasen einsehen.</p>
-            <?php endif; ?>
         </div>
         <div class="card" style="background:var(--surface-soft);">
-            <h3>Was sehe ich als Gast?</h3>
+            <h3>Was bekomme ich?</h3>
             <ul style="color:var(--muted); line-height:1.6;">
+                <li>Eigenes Spielerprofil mit Phase-10-Karte</li>
                 <li>Aktuelle Rangliste & Auszahlungen</li>
-                <li>Alle Phasen inkl. Info-Spalte</li>
                 <li>Kein Zugriff auf Admin-Funktionen</li>
             </ul>
         </div>
@@ -549,6 +784,7 @@ if ($isAdmin) {
                 <label>Nutzername<input name="username" required></label>
                 <label>Anzeigename<input name="display_name" required></label>
                 <label>Passwort<input type="password" name="password" required></label>
+                <label>Farbe der Karte<input type="color" name="color" value="#1e88e5"></label>
                 <label>Rolle
                     <select name="role">
                         <option value="player">Spieler</option>
@@ -557,6 +793,19 @@ if ($isAdmin) {
                 </label>
                 <button type="submit">Speichern</button>
             </form>
+        </div>
+
+        <div class="card">
+            <h2>Gastaccount anlegen</h2>
+            <form method="post">
+                <input type="hidden" name="action" value="create_guest">
+                <label>Anzeigename<input name="display_name" required></label>
+                <label>Gastcode (4-stellig)<input name="guest_code" pattern="\d{4}" minlength="4" maxlength="4" required></label>
+                <label>Startguthaben (€)<input type="number" name="deposit_euro" step="0.01" min="0" value="0"></label>
+                <label>Kartenfarbe<input type="color" name="color" value="#1e88e5"></label>
+                <button type="submit">Gastaccount speichern</button>
+            </form>
+            <p class="subtitle">Gastaccounts sind 24 Stunden gültig und werden danach automatisch gelöscht.</p>
         </div>
 
         <div class="card">
@@ -587,6 +836,7 @@ if ($isAdmin) {
                     </select>
                 </label>
                 <label>Neuer Anzeigename<input name="display_name" required></label>
+                <label>Kartenfarbe<input type="color" name="color" value="#1e88e5"></label>
                 <button type="submit">Speichern</button>
             </form>
         </div>
@@ -596,7 +846,7 @@ if ($isAdmin) {
 <section class="section" data-tab="admin-game">
     <div class="grid two">
         <div class="card">
-            <h2>Einzahlungen & Gastcode</h2>
+            <h2>Einzahlungen</h2>
             <form method="post">
                 <input type="hidden" name="action" value="update_deposit">
                 <label>Spieler
@@ -610,14 +860,6 @@ if ($isAdmin) {
                     <input type="number" name="deposit_euro" step="0.01" min="0" required>
                 </label>
                 <button type="submit">Einzahlung speichern</button>
-            </form>
-            <hr style="border:1px solid var(--border); margin:1rem 0;">
-            <form method="post">
-                <input type="hidden" name="action" value="update_guest_code">
-                <label>Gastcode (4 Ziffern)
-                    <input name="guest_code" pattern="\d{4}" minlength="4" maxlength="4" value="<?php echo htmlspecialchars($guestCode); ?>" required>
-                </label>
-                <button type="submit">Gastcode aktualisieren</button>
             </form>
         </div>
         <div class="card">
@@ -665,7 +907,7 @@ if ($isAdmin) {
                                 <input type="number" name="points" value="<?php echo $score['points']; ?>" style="width:90px;">
                                 <button type="submit">Aktualisieren</button>
                             </form>
-                            <form method="post" onsubmit="return confirm('Eintrag löschen?');">
+                            <form method="post">
                                 <input type="hidden" name="score_id" value="<?php echo $score['id']; ?>">
                                 <input type="hidden" name="action" value="delete_score">
                                 <button type="submit" style="background: var(--danger); color: #0b1220;">Löschen</button>
@@ -719,6 +961,72 @@ if ($isAdmin) {
     const hashTab = window.location.hash.replace('#', '');
     const startTab = Array.from(buttons).some(b => b.dataset.tab === hashTab) ? hashTab : initial;
     activate(startTab);
+
+    function formatEuro(cents) {
+        return (cents / 100).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function syncCard(userId, completed, percent, remainingCents) {
+        const card = document.querySelector(`.player-card[data-user-id="${userId}"]`);
+        if (!card) return;
+        const checkboxes = card.querySelectorAll('input[type="checkbox"][name="phase_completed[]"]');
+        checkboxes.forEach(cb => {
+            cb.checked = completed.includes(parseInt(cb.value, 10));
+        });
+        const bar = card.querySelector(`[data-progress-bar="${userId}"]`);
+        if (bar) bar.style.width = `${percent}%`;
+        const text = card.querySelector(`[data-progress-text="${userId}"]`);
+        if (text) text.textContent = `${percent}%`;
+        const remaining = card.querySelector(`[data-remaining-for="${userId}"]`);
+        if (remaining && typeof remainingCents === 'number' && !Number.isNaN(remainingCents)) {
+            remaining.textContent = `Restguthaben: ${formatEuro(remainingCents)} €`;
+        }
+    }
+
+    const phaseForms = document.querySelectorAll('.phase-form');
+    phaseForms.forEach(form => {
+        const userId = form.dataset.userId;
+        const checkboxes = form.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(cb => {
+            cb.addEventListener('change', () => {
+                const data = new FormData(form);
+                data.append('ajax', '1');
+                fetch('', {
+                    method: 'POST',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                    body: data
+                })
+                    .then(r => r.json())
+                    .then(res => {
+                        if (!res.success) {
+                            throw new Error(res.error || 'Fehler beim Speichern');
+                        }
+                        syncCard(res.user_id, res.completed, res.percent, res.remaining_cents);
+                    })
+                    .catch(err => {
+                        console.error(err);
+                        alert('Konnte Fortschritt nicht speichern. Bitte Seite neu laden.');
+                    });
+            });
+        });
+    });
+
+    function pollProgress() {
+        if (!phaseForms.length) return;
+        fetch('?action=progress', { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(r => r.ok ? r.json() : { success: false })
+            .then(data => {
+                if (!data.success || !Array.isArray(data.players)) return;
+                data.players.forEach(player => {
+                    const percent = (player.completed?.length || 0) * 10;
+                    syncCard(player.id, player.completed.map(Number), percent, player.remaining_cents);
+                });
+            })
+            .catch(() => {});
+    }
+
+    pollProgress();
+    setInterval(pollProgress, 5000);
 </script>
 </body>
 </html>
