@@ -447,6 +447,9 @@ if (isset($_GET['action']) && $_GET['action'] === 'progress') {
             background: linear-gradient(160deg, #f6f7fb 0%, #cfd8e3 70%, #b7c4d3 100%);
             box-shadow: inset 0 0 0 2px rgba(0,0,0,0.05), 0 18px 40px rgba(0,0,0,0.35);
             border-radius: 18px;
+            min-height: 420px;
+            display: flex;
+            flex-direction: column;
         }
         .player-card::after {
             content: '';
@@ -485,10 +488,23 @@ if (isset($_GET['action']) && $_GET['action'] === 'progress') {
             color: #0b1220;
         }
         .phase-steps input { width: auto; }
+        .phase-form { margin-top: auto; }
         .progress-track { width: 100%; height: 10px; border-radius: 999px; background: rgba(11, 18, 32, 0.12); overflow: hidden; }
         .progress-track span { display: block; height: 100%; background: linear-gradient(90deg, #0b1220, var(--accent)); }
         @media (max-width: 720px) {
             header { flex-direction: column; align-items: flex-start; position: static; }
+            .nav { overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: .5rem; }
+            .section { padding: 0 1rem 1.5rem; }
+            .grid.two, .grid.three { grid-template-columns: 1fr; }
+            .tab-btn { flex: 0 0 auto; }
+            .player-card {
+                min-height: calc(100vh - 260px);
+                border-radius: 24px;
+                padding: 1.5rem;
+            }
+            .phase-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .phase-steps label { padding: .55rem .65rem; }
+            .phase-steps input { transform: scale(1.2); }
         }
     </style>
 </head>
@@ -856,7 +872,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'progress') {
                                 <input type="number" name="points" value="<?php echo $score['points']; ?>" style="width:90px;">
                                 <button type="submit">Aktualisieren</button>
                             </form>
-                            <form method="post" onsubmit="return confirm('Eintrag löschen?');">
+                            <form method="post">
                                 <input type="hidden" name="score_id" value="<?php echo $score['id']; ?>">
                                 <input type="hidden" name="action" value="delete_score">
                                 <button type="submit" style="background: var(--danger); color: #0b1220;">Löschen</button>
