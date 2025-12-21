@@ -31,6 +31,9 @@ function initializeSchema(PDO $db, bool $bootstrap): void
         display_name TEXT NOT NULL,
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ("admin", "player")),
+        color TEXT NOT NULL DEFAULT "#1f6feb",
+        guest_code TEXT DEFAULT NULL,
+        guest_expires_at TEXT DEFAULT NULL,
         deposit_cents INTEGER NOT NULL DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )');
@@ -48,6 +51,15 @@ function initializeSchema(PDO $db, bool $bootstrap): void
         round_number INTEGER NOT NULL DEFAULT 1,
         points INTEGER NOT NULL DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )');
+
+    $db->exec('CREATE TABLE IF NOT EXISTS phase_progress (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        phase_number INTEGER NOT NULL,
+        completed INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, phase_number)
     )');
 
     if ($bootstrap) {
@@ -80,14 +92,19 @@ function ensureDefaults(PDO $db): void
 {
     $adminCount = (int)$db->query('SELECT COUNT(*) FROM users WHERE role = "admin"')->fetchColumn();
     if ($adminCount === 0) {
-        $stmt = $db->prepare('INSERT INTO users (username, display_name, password_hash, role) VALUES (:u, :d, :p, :r)');
+        $stmt = $db->prepare('INSERT INTO users (username, display_name, password_hash, role, color) VALUES (:u, :d, :p, :r, :c)');
         $stmt->execute([
             ':u' => DEFAULT_ADMIN_USER,
             ':d' => 'Administrator',
             ':p' => password_hash(DEFAULT_ADMIN_PASS, PASSWORD_DEFAULT),
             ':r' => 'admin',
+            ':c' => '#1f6feb',
         ]);
     }
+
+    addColumnIfMissing($db, 'users', 'color', 'TEXT', '"#1f6feb"');
+    addColumnIfMissing($db, 'users', 'guest_code', 'TEXT', 'NULL');
+    addColumnIfMissing($db, 'users', 'guest_expires_at', 'TEXT', 'NULL');
 
     $phaseCount = (int)$db->query('SELECT COUNT(*) FROM phases')->fetchColumn();
     if ($phaseCount < 10) {
@@ -100,5 +117,15 @@ function ensureDefaults(PDO $db): void
                 ':t' => 'Phase ' . $num,
             ]);
         }
+    }
+}
+
+function addColumnIfMissing(PDO $db, string $table, string $column, string $type, string $default): void
+{
+    $stmt = $db->prepare('PRAGMA table_info(' . $table . ')');
+    $stmt->execute();
+    $columns = array_column($stmt->fetchAll(), 'name');
+    if (!in_array($column, $columns, true)) {
+        $db->exec(sprintf('ALTER TABLE %s ADD COLUMN %s %s DEFAULT %s', $table, $column, $type, $default));
     }
 }
