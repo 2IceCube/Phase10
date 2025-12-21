@@ -32,6 +32,10 @@ function initializeSchema(PDO $db, bool $bootstrap): void
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ("admin", "player")),
         deposit_cents INTEGER NOT NULL DEFAULT 0,
+        color TEXT NOT NULL DEFAULT "#2f8bff",
+        is_guest INTEGER NOT NULL DEFAULT 0,
+        guest_code TEXT,
+        guest_expires_at TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )');
 
@@ -50,10 +54,39 @@ function initializeSchema(PDO $db, bool $bootstrap): void
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )');
 
+    $db->exec('CREATE TABLE IF NOT EXISTS phase_progress (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        phase_number INTEGER NOT NULL,
+        completed INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, phase_number)
+    )');
+
+    migrateUsersTable($db);
+
     if ($bootstrap) {
         seedInitialData($db);
     } else {
         ensureDefaults($db);
+    }
+}
+
+function migrateUsersTable(PDO $db): void
+{
+    $columns = $db->query('PRAGMA table_info(users)')->fetchAll();
+    $existing = array_column($columns, 'name');
+
+    if (!in_array('color', $existing, true)) {
+        $db->exec('ALTER TABLE users ADD COLUMN color TEXT NOT NULL DEFAULT "#2f8bff"');
+    }
+    if (!in_array('is_guest', $existing, true)) {
+        $db->exec('ALTER TABLE users ADD COLUMN is_guest INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!in_array('guest_code', $existing, true)) {
+        $db->exec('ALTER TABLE users ADD COLUMN guest_code TEXT');
+    }
+    if (!in_array('guest_expires_at', $existing, true)) {
+        $db->exec('ALTER TABLE users ADD COLUMN guest_expires_at TEXT');
     }
 }
 
